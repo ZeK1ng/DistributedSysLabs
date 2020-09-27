@@ -44,7 +44,7 @@ func(m *Master) WatchMan(index int , ttype string){
 		<-timeLapse.C
 		if(ttype == "MAP"){
 			if(!m.Mtasks[index].DoneT){
-				m.Mtasks[index].Assigned = falseბზეც ამ ჩემ ლეპტოპზე გიჟივით ნელა გადის და ბოლოშიც აფლოადს 2 წუთ
+				m.Mtasks[index].Assigned = false
 			}
 		}else{
 			if(!m.RTasks[index].DoneT){
