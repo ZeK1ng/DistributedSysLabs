@@ -20,6 +20,8 @@ package raft
 import "sync"
 import "sync/atomic"
 import "../labrpc"
+import "time"
+import "math/rand"
 
 // import "bytes"
 // import "../labgob"
@@ -47,7 +49,7 @@ type ApplyMsg struct {
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	// mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -56,16 +58,49 @@ type Raft struct {
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
+	currentTerm int 
+	logs []LogEntry
+	votedFor int 
+	commitIndex int
+	lastApplied int 
+	nextIndex[] int 
+	LeaderID int
+	matchIndex[] int
+	lastHeartBeat time.Time
+	State string
+	mut sync.Mutex
+	applyChan chan ApplyMsg
 }
 
+type LogEntry struct{
+	Term int
+	Cmd interface{}
+	Index int 
+}
+type AppendEntriesRequest struct{
+	Term int
+	LeaderID int
+	PrevLogIndex int
+	PrevLogTerm int
+	Entries []LogEntry
+	LeaderCommintIndex int
+}
+type AppendEntriesResponce struct{
+	Success bool
+	Term int
+}
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
 
 	var term int
 	var isleader bool
+	isleader = false
 	// Your code here (2A).
+	rf.mut.Lock()
+	defer rf.mut.Unlock()
+	term = rf.currentTerm 
+	if rf.State == "LEADER" { isleader = true}
 	return term, isleader
 }
 
@@ -117,7 +152,12 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-}
+	LastLogInd int
+	LastLogTerm int 
+	Term int 
+	CandidateID int 
+}	
+
 
 //
 // example RequestVote RPC reply structure.
@@ -125,6 +165,8 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
+	VoteGranted bool
+	Term int
 }
 
 //
@@ -132,6 +174,23 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	rf.mut.Lock()
+	DPrintf("Args Term %v Rf %v  Candid %v \n",args.Term,rf.me , args.CandidateID)
+	reply.Term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
+		DPrintf("Not Voted Rf %v  Candid %v \n",rf.me , args.CandidateID)
+
+	}else if (args.Term == rf.currentTerm && rf.votedFor == -1) || args.Term >rf.currentTerm{
+		reply.VoteGranted = true
+		rf.votedFor = args.CandidateID
+		rf.lastHeartBeat = time.Now()
+		rf.State = "FOLLOWER"
+		DPrintf("Voted Args Term %v Rf %v  Candid %v \n",args.Term,rf.me , args.CandidateID)
+	}
+	rf.mut.Unlock()
+	rf.updateTerm(args.Term)
+
 }
 
 //
@@ -234,10 +293,154 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.currentTerm = 0
+	rf.logs = make([]LogEntry, 0)
+	rf.State = "FOLLOWER"
+	peerln := len(peers) 
+	rf.nextIndex = make([]int,peerln)
+	rf.matchIndex = make([]int , peerln)
+	rf.votedFor = -1
+	rf.LeaderID = -1
+	rf.lastApplied = -1
+	rf.commitIndex = -1
+	rf.applyChan = applyCh
+	rf.lastHeartBeat = time.Now()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	go rf.kickOff()
 
 	return rf
+}
+
+func getRandomTimePoint(l int , h int) int {
+	return l + rand.New(rand.NewSource(time.Now().UnixNano())).Intn(h-l)
+}
+
+func (rf* Raft)kickOff(){
+	for{
+		rf.mut.Lock()
+		lastHr := rf.lastHeartBeat
+		// votedFor := rf.votedFor
+		if rf.State == "FOLLOWER" || rf.State == "CANDIDATE" {
+			rf.mut.Unlock()
+			randomTimePoint := getRandomTimePoint(200,600)
+			time.Sleep(time.Duration(randomTimePoint)*time.Millisecond)
+			if time.Since(lastHr) > time.Duration(randomTimePoint)*time.Millisecond {
+				rf.handleTimeout()
+			}
+		}else{
+			rf.mut.Unlock()
+			// time.Sleep(time.Millisecond*100)
+			rf.sendHeartBeats()	
+
+		}
+	}
+}
+
+func(rf * Raft) AppendEntries(req* AppendEntriesRequest , resp * AppendEntriesResponce){
+	rf.mut.Lock()
+	if req.Term >= rf.currentTerm{
+		rf.votedFor = -1
+		rf.LeaderID = -1 
+		rf.currentTerm = req.Term
+		rf.State = "FOLLOWER"
+		rf.lastHeartBeat = time.Now()
+	}
+	rf.mut.Unlock()
+}
+func(rf *Raft) handleTimeout(){
+	rf.mut.Lock()
+	voteGranted :=1	
+	req := RequestVoteArgs{}
+	resp := RequestVoteReply{}
+	rf.currentTerm++
+	rf.votedFor = rf.me
+	rf.State = "CANDIDATE"
+	req.CandidateID=rf.me
+	req.Term = rf.currentTerm
+	rf.mut.Unlock()
+
+	for i :=0 ; i<len(rf.peers); i++ {
+		
+		if i == rf.me { continue }
+		go func(ind int , responce RequestVoteReply, request RequestVoteArgs){	
+			if rf.sendRequestVote(ind,&request,&responce) {
+				rf.updateTerm(responce.Term)
+				if responce.VoteGranted	{
+					rf.mut.Lock()
+					voteGranted++
+					rf.mut.Unlock()
+				}	
+			}
+		}(i,resp,req)
+	}
+	time.Sleep(time.Millisecond * 50)
+	rf.mut.Lock()
+	voteCopy:=voteGranted
+	rf.mut.Unlock()
+	rf.checkAndBecomeLeader(voteCopy,len(rf.peers))
+}
+
+func(rf *Raft)updateTerm(respterm int){
+	rf.mut.Lock()
+	defer rf.mut.Unlock()
+	if respterm <= rf.currentTerm { return }
+	rf.currentTerm = respterm
+	rf.votedFor = -1 
+	rf.State = "FOLLOWER"
+	rf.LeaderID = -1
+}
+
+
+func (rf * Raft)checkAndBecomeLeader(voteGranted int , voteFinished int){
+	rf.mut.Lock()
+	if voteGranted < voteFinished/2 + 1{
+		rf.mut.Unlock()
+		return
+	}
+	if rf.State != "CANDIDATE" { 
+		rf.mut.Unlock()
+		return
+	}
+	
+	rf.State = "LEADER"
+	rf.votedFor = -1
+	rf.mut.Unlock()
+}
+func (rf * Raft) sendHeartBeats(){
+
+		rf.mut.Lock()
+		if rf.State != "LEADER" {
+			rf.mut.Unlock()
+			return 
+		}
+		req := AppendEntriesRequest{}
+		req.LeaderID = rf.me
+		req.Term = rf.currentTerm
+		rf.mut.Unlock()
+		res := AppendEntriesResponce{}
+		for i:=0; i< len(rf.peers); i++ {
+			if i == rf.me {
+				continue
+			}
+			go func (ind int , req AppendEntriesRequest, resp AppendEntriesResponce){
+				rf.mut.Lock()
+				if rf.State != "LEADER" {
+					rf.mut.Unlock()
+					return
+				}
+				rf.mut.Unlock()
+				if rf.sendAppendEnrty(ind,&req,&res){
+					rf.updateTerm(resp.Term)
+				}
+			}(i,req,res)
+		}	
+
+		time.Sleep(time.Millisecond*100)
+}
+
+func (rf * Raft) sendAppendEnrty(ind int ,req *AppendEntriesRequest,res *AppendEntriesResponce) bool{
+	status := rf.peers[ind].Call("Raft.AppendEntries",req,res)
+	return status
 }
