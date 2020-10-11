@@ -351,13 +351,13 @@ func(rf * Raft) AppendEntries(req* AppendEntriesRequest , resp * AppendEntriesRe
 }
 func(rf *Raft) handleTimeout(){
 	rf.mut.Lock()
-	voteGranted :=1	
+	voteGranted := 1	
 	req := RequestVoteArgs{}
 	resp := RequestVoteReply{}
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	rf.State = "CANDIDATE"
-	req.CandidateID=rf.me
+	req.CandidateID = rf.me
 	req.Term = rf.currentTerm
 	rf.mut.Unlock()
 
